@@ -2,24 +2,21 @@ package v1
 
 import (
 	"encoding/json"
-	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/docker/distribution/digest"
+	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
-	"github.com/docker/docker/pkg/version"
+	"github.com/docker/docker/pkg/stringid"
+	"github.com/opencontainers/go-digest"
+	"github.com/sirupsen/logrus"
 )
-
-var validHex = regexp.MustCompile(`^([a-f0-9]{64})$`)
 
 // noFallbackMinVersion is the minimum version for which v1compatibility
 // information will not be marshaled through the Image struct to remove
 // blank fields.
-var noFallbackMinVersion = version.Version("1.8.3")
+var noFallbackMinVersion = "1.8.3"
 
 // HistoryFromConfig creates a History struct from v1 configuration JSON
 func HistoryFromConfig(imageJSON []byte, emptyLayer bool) (image.History, error) {
@@ -77,7 +74,7 @@ func MakeConfigFromV1Config(imageJSON []byte, rootfs *image.RootFS, history []im
 		return nil, err
 	}
 
-	useFallback := version.Version(dver.DockerVersion).LessThan(noFallbackMinVersion)
+	useFallback := versions.LessThan(dver.DockerVersion, noFallbackMinVersion)
 
 	if useFallback {
 		var v1Image image.V1Image
@@ -109,7 +106,7 @@ func MakeConfigFromV1Config(imageJSON []byte, rootfs *image.RootFS, history []im
 	return json.Marshal(c)
 }
 
-// MakeV1ConfigFromConfig creates an legacy V1 image config from an Image struct
+// MakeV1ConfigFromConfig creates a legacy V1 image config from an Image struct
 func MakeV1ConfigFromConfig(img *image.Image, v1ID, parentV1ID string, throwaway bool) ([]byte, error) {
 	// Top-level v1compatibility string should be a modified version of the
 	// image config.
@@ -149,8 +146,5 @@ func rawJSON(value interface{}) *json.RawMessage {
 
 // ValidateID checks whether an ID string is a valid image ID.
 func ValidateID(id string) error {
-	if ok := validHex.MatchString(id); !ok {
-		return fmt.Errorf("image ID %q is invalid", id)
-	}
-	return nil
+	return stringid.ValidateID(id)
 }

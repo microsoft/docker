@@ -1,3 +1,5 @@
+// +build !solaris
+
 package registry
 
 import (
@@ -8,10 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/client/transport"
-	"github.com/docker/docker/reference"
-	"github.com/docker/engine-api/types"
-	registrytypes "github.com/docker/engine-api/types/registry"
+	"github.com/docker/docker/api/types"
+	registrytypes "github.com/docker/docker/api/types/registry"
+	"github.com/stretchr/testify/assert"
 )
 
 var (
@@ -199,7 +202,7 @@ func TestGetRemoteImageLayer(t *testing.T) {
 
 func TestGetRemoteTag(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	repoRef, err := reference.ParseNamed(REPO)
+	repoRef, err := reference.ParseNormalizedNamed(REPO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +212,7 @@ func TestGetRemoteTag(t *testing.T) {
 	}
 	assertEqual(t, tag, imageID, "Expected tag test to map to "+imageID)
 
-	bazRef, err := reference.ParseNamed("foo42/baz")
+	bazRef, err := reference.ParseNormalizedNamed("foo42/baz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +224,7 @@ func TestGetRemoteTag(t *testing.T) {
 
 func TestGetRemoteTags(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	repoRef, err := reference.ParseNamed(REPO)
+	repoRef, err := reference.ParseNormalizedNamed(REPO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +236,7 @@ func TestGetRemoteTags(t *testing.T) {
 	assertEqual(t, tags["latest"], imageID, "Expected tag latest to map to "+imageID)
 	assertEqual(t, tags["test"], imageID, "Expected tag test to map to "+imageID)
 
-	bazRef, err := reference.ParseNamed("foo42/baz")
+	bazRef, err := reference.ParseNormalizedNamed("foo42/baz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +253,7 @@ func TestGetRepositoryData(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := "http://" + parsedURL.Host + "/v1/"
-	repoRef, err := reference.ParseNamed(REPO)
+	repoRef, err := reference.ParseNormalizedNamed(REPO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +506,7 @@ func TestParseRepositoryInfo(t *testing.T) {
 	}
 
 	for reposName, expectedRepoInfo := range expectedRepoInfos {
-		named, err := reference.WithName(reposName)
+		named, err := reference.ParseNormalizedNamed(reposName)
 		if err != nil {
 			t.Error(err)
 		}
@@ -513,9 +516,9 @@ func TestParseRepositoryInfo(t *testing.T) {
 			t.Error(err)
 		} else {
 			checkEqual(t, repoInfo.Index.Name, expectedRepoInfo.Index.Name, reposName)
-			checkEqual(t, repoInfo.RemoteName(), expectedRepoInfo.RemoteName, reposName)
-			checkEqual(t, repoInfo.Name(), expectedRepoInfo.LocalName, reposName)
-			checkEqual(t, repoInfo.FullName(), expectedRepoInfo.CanonicalName, reposName)
+			checkEqual(t, reference.Path(repoInfo.Name), expectedRepoInfo.RemoteName, reposName)
+			checkEqual(t, reference.FamiliarName(repoInfo.Name), expectedRepoInfo.LocalName, reposName)
+			checkEqual(t, repoInfo.Name.Name(), expectedRepoInfo.CanonicalName, reposName)
 			checkEqual(t, repoInfo.Index.Official, expectedRepoInfo.Index.Official, reposName)
 			checkEqual(t, repoInfo.Official, expectedRepoInfo.Official, reposName)
 		}
@@ -537,7 +540,7 @@ func TestNewIndexInfo(t *testing.T) {
 		}
 	}
 
-	config := newServiceConfig(ServiceOptions{})
+	config := emptyServiceConfig
 	noMirrors := []string{}
 	expectedIndexInfos := map[string]*registrytypes.IndexInfo{
 		IndexName: {
@@ -568,7 +571,11 @@ func TestNewIndexInfo(t *testing.T) {
 	testIndexInfo(config, expectedIndexInfos)
 
 	publicMirrors := []string{"http://mirror1.local", "http://mirror2.local"}
-	config = makeServiceConfig(publicMirrors, []string{"example.com"})
+	var err error
+	config, err = makeServiceConfig(publicMirrors, []string{"example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	expectedIndexInfos = map[string]*registrytypes.IndexInfo{
 		IndexName: {
@@ -616,7 +623,10 @@ func TestNewIndexInfo(t *testing.T) {
 	}
 	testIndexInfo(config, expectedIndexInfos)
 
-	config = makeServiceConfig(nil, []string{"42.42.0.0/16"})
+	config, err = makeServiceConfig(nil, []string{"42.42.0.0/16"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	expectedIndexInfos = map[string]*registrytypes.IndexInfo{
 		"example.com": {
 			Name:     "example.com",
@@ -661,13 +671,17 @@ func TestMirrorEndpointLookup(t *testing.T) {
 		}
 		return false
 	}
-	s := Service{config: makeServiceConfig([]string{"my.mirror"}, nil)}
+	cfg, err := makeServiceConfig([]string{"https://my.mirror"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := DefaultService{config: cfg}
 
 	imageName, err := reference.WithName(IndexName + "/test/image")
 	if err != nil {
 		t.Error(err)
 	}
-	pushAPIEndpoints, err := s.LookupPushEndpoints(imageName.Hostname())
+	pushAPIEndpoints, err := s.LookupPushEndpoints(reference.Domain(imageName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +689,7 @@ func TestMirrorEndpointLookup(t *testing.T) {
 		t.Fatal("Push endpoint should not contain mirror")
 	}
 
-	pullAPIEndpoints, err := s.LookupPullEndpoints(imageName.Hostname())
+	pullAPIEndpoints, err := s.LookupPullEndpoints(reference.Domain(imageName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +700,7 @@ func TestMirrorEndpointLookup(t *testing.T) {
 
 func TestPushRegistryTag(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	repoRef, err := reference.ParseNamed(REPO)
+	repoRef, err := reference.ParseNormalizedNamed(REPO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +722,7 @@ func TestPushImageJSONIndex(t *testing.T) {
 			Checksum: "sha256:bea7bf2e4bacd479344b737328db47b18880d09096e6674165533aa994f5e9f2",
 		},
 	}
-	repoRef, err := reference.ParseNamed(REPO)
+	repoRef, err := reference.ParseNormalizedNamed(REPO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +744,7 @@ func TestPushImageJSONIndex(t *testing.T) {
 
 func TestSearchRepositories(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	results, err := r.SearchRepositories("fakequery")
+	results, err := r.SearchRepositories("fakequery", 25)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,16 +759,12 @@ func TestSearchRepositories(t *testing.T) {
 func TestTrustedLocation(t *testing.T) {
 	for _, url := range []string{"http://example.com", "https://example.com:7777", "http://docker.io", "http://test.docker.com", "https://fakedocker.com"} {
 		req, _ := http.NewRequest("GET", url, nil)
-		if trustedLocation(req) == true {
-			t.Fatalf("'%s' shouldn't be detected as a trusted location", url)
-		}
+		assert.False(t, trustedLocation(req))
 	}
 
 	for _, url := range []string{"https://docker.io", "https://test.docker.com:80"} {
 		req, _ := http.NewRequest("GET", url, nil)
-		if trustedLocation(req) == false {
-			t.Fatalf("'%s' should be detected as a trusted location", url)
-		}
+		assert.True(t, trustedLocation(req))
 	}
 }
 
@@ -809,6 +819,51 @@ func TestAddRequiredHeadersToRedirectedRequests(t *testing.T) {
 	}
 }
 
+func TestAllowNondistributableArtifacts(t *testing.T) {
+	tests := []struct {
+		addr       string
+		registries []string
+		expected   bool
+	}{
+		{IndexName, nil, false},
+		{"example.com", []string{}, false},
+		{"example.com", []string{"example.com"}, true},
+		{"localhost", []string{"localhost:5000"}, false},
+		{"localhost:5000", []string{"localhost:5000"}, true},
+		{"localhost", []string{"example.com"}, false},
+		{"127.0.0.1:5000", []string{"127.0.0.1:5000"}, true},
+		{"localhost", nil, false},
+		{"localhost:5000", nil, false},
+		{"127.0.0.1", nil, false},
+		{"localhost", []string{"example.com"}, false},
+		{"127.0.0.1", []string{"example.com"}, false},
+		{"example.com", nil, false},
+		{"example.com", []string{"example.com"}, true},
+		{"127.0.0.1", []string{"example.com"}, false},
+		{"127.0.0.1:5000", []string{"example.com"}, false},
+		{"example.com:5000", []string{"42.42.0.0/16"}, true},
+		{"example.com", []string{"42.42.0.0/16"}, true},
+		{"example.com:5000", []string{"42.42.42.42/8"}, true},
+		{"127.0.0.1:5000", []string{"127.0.0.0/8"}, true},
+		{"42.42.42.42:5000", []string{"42.1.1.1/8"}, true},
+		{"invalid.domain.com", []string{"42.42.0.0/16"}, false},
+		{"invalid.domain.com", []string{"invalid.domain.com"}, true},
+		{"invalid.domain.com:5000", []string{"invalid.domain.com"}, false},
+		{"invalid.domain.com:5000", []string{"invalid.domain.com:5000"}, true},
+	}
+	for _, tt := range tests {
+		config, err := newServiceConfig(ServiceOptions{
+			AllowNondistributableArtifacts: tt.registries,
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		if v := allowNondistributableArtifacts(config, tt.addr); v != tt.expected {
+			t.Errorf("allowNondistributableArtifacts failed for %q %v, expected %v got %v", tt.addr, tt.registries, tt.expected, v)
+		}
+	}
+}
+
 func TestIsSecureIndex(t *testing.T) {
 	tests := []struct {
 		addr               string
@@ -842,7 +897,10 @@ func TestIsSecureIndex(t *testing.T) {
 		{"invalid.domain.com:5000", []string{"invalid.domain.com:5000"}, false},
 	}
 	for _, tt := range tests {
-		config := makeServiceConfig(nil, tt.insecureRegistries)
+		config, err := makeServiceConfig(nil, tt.insecureRegistries)
+		if err != nil {
+			t.Error(err)
+		}
 		if sec := isSecureIndex(config, tt.addr); sec != tt.expected {
 			t.Errorf("isSecureIndex failed for %q %v, expected %v got %v", tt.addr, tt.insecureRegistries, tt.expected, sec)
 		}

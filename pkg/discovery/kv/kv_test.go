@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker/pkg/discovery"
 	"github.com/docker/libkv"
 	"github.com/docker/libkv/store"
-
 	"github.com/go-check/check"
 )
 
@@ -130,7 +129,6 @@ func (s *Mock) AtomicDelete(key string, previous *store.KVPair) (bool, error) {
 
 // Close mock
 func (s *Mock) Close() {
-	return
 }
 
 func (ds *DiscoverySuite) TestInitializeWithCerts(c *check.C) {
@@ -251,7 +249,7 @@ func (ds *DiscoverySuite) TestWatch(c *check.C) {
 
 	close(mockCh)
 	// Give it enough time to call WatchTree.
-	time.Sleep(3)
+	time.Sleep(3 * time.Second)
 
 	// Stop and make sure it closes all channels.
 	close(stopCh)

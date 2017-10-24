@@ -8,7 +8,9 @@ import (
 	"io/ioutil"
 	"testing"
 
-	"github.com/docker/engine-api/types/container"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/sysinfo"
+	"github.com/stretchr/testify/assert"
 )
 
 // TODO Windows: This will need addressing for a Windows daemon.
@@ -60,43 +62,33 @@ func TestNetworkModeTest(t *testing.T) {
 }
 
 func TestIpcModeTest(t *testing.T) {
-	ipcModes := map[container.IpcMode][]bool{
-		// private, host, container, valid
-		"":                         {true, false, false, true},
-		"something:weird":          {true, false, false, false},
-		":weird":                   {true, false, false, true},
-		"host":                     {false, true, false, true},
-		"container:name":           {false, false, true, true},
-		"container:name:something": {false, false, true, false},
-		"container:":               {false, false, true, false},
+	ipcModes := map[container.IpcMode]struct {
+		private   bool
+		host      bool
+		container bool
+		shareable bool
+		valid     bool
+		ctrName   string
+	}{
+		"":                      {valid: true},
+		"private":               {private: true, valid: true},
+		"something:weird":       {},
+		":weird":                {},
+		"host":                  {host: true, valid: true},
+		"container":             {},
+		"container:":            {container: true, valid: true, ctrName: ""},
+		"container:name":        {container: true, valid: true, ctrName: "name"},
+		"container:name1:name2": {container: true, valid: true, ctrName: "name1:name2"},
+		"shareable":             {shareable: true, valid: true},
 	}
+
 	for ipcMode, state := range ipcModes {
-		if ipcMode.IsPrivate() != state[0] {
-			t.Fatalf("IpcMode.IsPrivate for %v should have been %v but was %v", ipcMode, state[0], ipcMode.IsPrivate())
-		}
-		if ipcMode.IsHost() != state[1] {
-			t.Fatalf("IpcMode.IsHost for %v should have been %v but was %v", ipcMode, state[1], ipcMode.IsHost())
-		}
-		if ipcMode.IsContainer() != state[2] {
-			t.Fatalf("IpcMode.IsContainer for %v should have been %v but was %v", ipcMode, state[2], ipcMode.IsContainer())
-		}
-		if ipcMode.Valid() != state[3] {
-			t.Fatalf("IpcMode.Valid for %v should have been %v but was %v", ipcMode, state[3], ipcMode.Valid())
-		}
-	}
-	containerIpcModes := map[container.IpcMode]string{
-		"":                      "",
-		"something":             "",
-		"something:weird":       "weird",
-		"container":             "",
-		"container:":            "",
-		"container:name":        "name",
-		"container:name1:name2": "name1:name2",
-	}
-	for ipcMode, container := range containerIpcModes {
-		if ipcMode.Container() != container {
-			t.Fatalf("Expected %v for %v but was %v", container, ipcMode, ipcMode.Container())
-		}
+		assert.Equal(t, state.private, ipcMode.IsPrivate(), "IpcMode.IsPrivate() parsing failed for %q", ipcMode)
+		assert.Equal(t, state.host, ipcMode.IsHost(), "IpcMode.IsHost()  parsing failed for %q", ipcMode)
+		assert.Equal(t, state.container, ipcMode.IsContainer(), "IpcMode.IsContainer()  parsing failed for %q", ipcMode)
+		assert.Equal(t, state.shareable, ipcMode.IsShareable(), "IpcMode.IsShareable()  parsing failed for %q", ipcMode)
+		assert.Equal(t, state.valid, ipcMode.Valid(), "IpcMode.Valid()  parsing failed for %q", ipcMode)
+		assert.Equal(t, state.ctrName, ipcMode.Container(), "IpcMode.Container() parsing failed for %q", ipcMode)
 	}
 }
 
@@ -166,11 +158,11 @@ func TestPidModeTest(t *testing.T) {
 func TestRestartPolicy(t *testing.T) {
 	restartPolicies := map[container.RestartPolicy][]bool{
 		// none, always, failure
-		container.RestartPolicy{}:                {false, false, false},
-		container.RestartPolicy{"something", 0}:  {false, false, false},
-		container.RestartPolicy{"no", 0}:         {true, false, false},
-		container.RestartPolicy{"always", 0}:     {false, true, false},
-		container.RestartPolicy{"on-failure", 0}: {false, false, true},
+		{}: {true, false, false},
+		{Name: "something", MaximumRetryCount: 0}:  {false, false, false},
+		{Name: "no", MaximumRetryCount: 0}:         {true, false, false},
+		{Name: "always", MaximumRetryCount: 0}:     {false, true, false},
+		{Name: "on-failure", MaximumRetryCount: 0}: {false, false, true},
 	}
 	for restartPolicy, state := range restartPolicies {
 		if restartPolicy.IsNone() != state[0] {
@@ -198,14 +190,12 @@ func TestDecodeHostConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		c, err := DecodeHostConfig(bytes.NewReader(b))
+		c, err := decodeHostConfig(bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(fmt.Errorf("Error parsing %s: %v", f, err))
 		}
 
-		if c.Privileged != false {
-			t.Fatalf("Expected privileged false, found %v\n", c.Privileged)
-		}
+		assert.False(t, c.Privileged)
 
 		if l := len(c.Binds); l != 1 {
 			t.Fatalf("Expected 1 bind, found %d\n", l)
@@ -216,7 +206,67 @@ func TestDecodeHostConfig(t *testing.T) {
 		}
 
 		if len(c.CapDrop) != 1 && c.CapDrop[0] != "NET_ADMIN" {
-			t.Fatalf("Expected CapDrop MKNOD, got %v", c.CapDrop)
+			t.Fatalf("Expected CapDrop NET_ADMIN, got %v", c.CapDrop)
+		}
+	}
+}
+
+func TestValidateResources(t *testing.T) {
+	type resourceTest struct {
+		ConfigCPURealtimePeriod   int64
+		ConfigCPURealtimeRuntime  int64
+		SysInfoCPURealtimePeriod  bool
+		SysInfoCPURealtimeRuntime bool
+		ErrorExpected             bool
+		FailureMsg                string
+	}
+
+	tests := []resourceTest{
+		{
+			ConfigCPURealtimePeriod:   1000,
+			ConfigCPURealtimeRuntime:  1000,
+			SysInfoCPURealtimePeriod:  true,
+			SysInfoCPURealtimeRuntime: true,
+			ErrorExpected:             false,
+			FailureMsg:                "Expected valid configuration",
+		},
+		{
+			ConfigCPURealtimePeriod:   5000,
+			ConfigCPURealtimeRuntime:  5000,
+			SysInfoCPURealtimePeriod:  false,
+			SysInfoCPURealtimeRuntime: true,
+			ErrorExpected:             true,
+			FailureMsg:                "Expected failure when cpu-rt-period is set but kernel doesn't support it",
+		},
+		{
+			ConfigCPURealtimePeriod:   5000,
+			ConfigCPURealtimeRuntime:  5000,
+			SysInfoCPURealtimePeriod:  true,
+			SysInfoCPURealtimeRuntime: false,
+			ErrorExpected:             true,
+			FailureMsg:                "Expected failure when cpu-rt-runtime is set but kernel doesn't support it",
+		},
+		{
+			ConfigCPURealtimePeriod:   5000,
+			ConfigCPURealtimeRuntime:  10000,
+			SysInfoCPURealtimePeriod:  true,
+			SysInfoCPURealtimeRuntime: false,
+			ErrorExpected:             true,
+			FailureMsg:                "Expected failure when cpu-rt-runtime is greater than cpu-rt-period",
+		},
+	}
+
+	for _, rt := range tests {
+		var hc container.HostConfig
+		hc.Resources.CPURealtimePeriod = rt.ConfigCPURealtimePeriod
+		hc.Resources.CPURealtimeRuntime = rt.ConfigCPURealtimeRuntime
+
+		var si sysinfo.SysInfo
+		si.CPURealtimePeriod = rt.SysInfoCPURealtimePeriod
+		si.CPURealtimeRuntime = rt.SysInfoCPURealtimeRuntime
+
+		if err := validateResources(&hc, &si); (err != nil) != rt.ErrorExpected {
+			t.Fatal(rt.FailureMsg, err)
 		}
 	}
 }

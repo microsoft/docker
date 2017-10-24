@@ -2,7 +2,7 @@
 //
 // It incorporates a dispatch table based on the parser.Node values (see the
 // parser package for more information) that are yielded from the parser itself.
-// Calling NewBuilder with the BuildOpts struct can be used to customize the
+// Calling newBuilder with the BuildOpts struct can be used to customize the
 // experience for execution purposes only. Parsing is controlled in the parser
 // package, and this division of responsibility should be respected.
 //
@@ -20,182 +20,219 @@
 package dockerfile
 
 import (
-	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 
-	"github.com/docker/docker/builder/dockerfile/command"
-	"github.com/docker/docker/builder/dockerfile/parser"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/builder"
+	"github.com/docker/docker/builder/dockerfile/instructions"
+	"github.com/docker/docker/pkg/system"
+	"github.com/docker/docker/runconfig/opts"
+	"github.com/pkg/errors"
 )
 
-// Environment variable interpolation will happen on these statements only.
-var replaceEnvAllowed = map[string]bool{
-	command.Env:        true,
-	command.Label:      true,
-	command.Add:        true,
-	command.Copy:       true,
-	command.Workdir:    true,
-	command.Expose:     true,
-	command.Volume:     true,
-	command.User:       true,
-	command.StopSignal: true,
-	command.Arg:        true,
+func dispatch(d dispatchRequest, cmd instructions.Command) (err error) {
+	if c, ok := cmd.(instructions.PlatformSpecific); ok {
+		optionsOS := system.ParsePlatform(d.builder.options.Platform).OS
+		err := c.CheckPlatform(optionsOS)
+		if err != nil {
+			return validationError{err}
+		}
+	}
+	runConfigEnv := d.state.runConfig.Env
+	envs := append(runConfigEnv, d.state.buildArgs.FilterAllowed(runConfigEnv)...)
+
+	if ex, ok := cmd.(instructions.SupportsSingleWordExpansion); ok {
+		err := ex.Expand(func(word string) (string, error) {
+			return d.shlex.ProcessWord(word, envs)
+		})
+		if err != nil {
+			return validationError{err}
+		}
+	}
+
+	defer func() {
+		if d.builder.options.ForceRemove {
+			d.builder.containerManager.RemoveAll(d.builder.Stdout)
+			return
+		}
+		if d.builder.options.Remove && err == nil {
+			d.builder.containerManager.RemoveAll(d.builder.Stdout)
+			return
+		}
+	}()
+	switch c := cmd.(type) {
+	case *instructions.EnvCommand:
+		return dispatchEnv(d, c)
+	case *instructions.MaintainerCommand:
+		return dispatchMaintainer(d, c)
+	case *instructions.LabelCommand:
+		return dispatchLabel(d, c)
+	case *instructions.AddCommand:
+		return dispatchAdd(d, c)
+	case *instructions.CopyCommand:
+		return dispatchCopy(d, c)
+	case *instructions.OnbuildCommand:
+		return dispatchOnbuild(d, c)
+	case *instructions.WorkdirCommand:
+		return dispatchWorkdir(d, c)
+	case *instructions.RunCommand:
+		return dispatchRun(d, c)
+	case *instructions.CmdCommand:
+		return dispatchCmd(d, c)
+	case *instructions.HealthCheckCommand:
+		return dispatchHealthcheck(d, c)
+	case *instructions.EntrypointCommand:
+		return dispatchEntrypoint(d, c)
+	case *instructions.ExposeCommand:
+		return dispatchExpose(d, c, envs)
+	case *instructions.UserCommand:
+		return dispatchUser(d, c)
+	case *instructions.VolumeCommand:
+		return dispatchVolume(d, c)
+	case *instructions.StopSignalCommand:
+		return dispatchStopSignal(d, c)
+	case *instructions.ArgCommand:
+		return dispatchArg(d, c)
+	case *instructions.ShellCommand:
+		return dispatchShell(d, c)
+	}
+	return errors.Errorf("unsupported command type: %v", reflect.TypeOf(cmd))
 }
 
-// Certain commands are allowed to have their args split into more
-// words after env var replacements. Meaning:
-//   ENV foo="123 456"
-//   EXPOSE $foo
-// should result in the same thing as:
-//   EXPOSE 123 456
-// and not treat "123 456" as a single word.
-// Note that: EXPOSE "$foo" and EXPOSE $foo are not the same thing.
-// Quotes will cause it to still be treated as single word.
-var allowWordExpansion = map[string]bool{
-	command.Expose: true,
+// dispatchState is a data object which is modified by dispatchers
+type dispatchState struct {
+	runConfig  *container.Config
+	maintainer string
+	cmdSet     bool
+	imageID    string
+	baseImage  builder.Image
+	stageName  string
+	buildArgs  *buildArgs
 }
 
-var evaluateTable map[string]func(*Builder, []string, map[string]bool, string) error
+func newDispatchState(baseArgs *buildArgs) *dispatchState {
+	args := baseArgs.Clone()
+	args.ResetAllowed()
+	return &dispatchState{runConfig: &container.Config{}, buildArgs: args}
+}
 
-func init() {
-	evaluateTable = map[string]func(*Builder, []string, map[string]bool, string) error{
-		command.Env:        env,
-		command.Label:      label,
-		command.Maintainer: maintainer,
-		command.Add:        add,
-		command.Copy:       dispatchCopy, // copy() is a go builtin
-		command.From:       from,
-		command.Onbuild:    onbuild,
-		command.Workdir:    workdir,
-		command.Run:        run,
-		command.Cmd:        cmd,
-		command.Entrypoint: entrypoint,
-		command.Expose:     expose,
-		command.Volume:     volume,
-		command.User:       user,
-		command.StopSignal: stopSignal,
-		command.Arg:        arg,
+type stagesBuildResults struct {
+	flat    []*container.Config
+	indexed map[string]*container.Config
+}
+
+func newStagesBuildResults() *stagesBuildResults {
+	return &stagesBuildResults{
+		indexed: make(map[string]*container.Config),
 	}
 }
 
-// This method is the entrypoint to all statement handling routines.
-//
-// Almost all nodes will have this structure:
-// Child[Node, Node, Node] where Child is from parser.Node.Children and each
-// node comes from parser.Node.Next. This forms a "line" with a statement and
-// arguments and we process them in this normalized form by hitting
-// evaluateTable with the leaf nodes of the command and the Builder object.
-//
-// ONBUILD is a special case; in this case the parser will emit:
-// Child[Node, Child[Node, Node...]] where the first node is the literal
-// "onbuild" and the child entrypoint is the command of the ONBUILD statement,
-// such as `RUN` in ONBUILD RUN foo. There is special case logic in here to
-// deal with that, at least until it becomes more of a general concern with new
-// features.
-func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
-	cmd := ast.Value
-	upperCasedCmd := strings.ToUpper(cmd)
+func (r *stagesBuildResults) getByName(name string) (*container.Config, bool) {
+	c, ok := r.indexed[strings.ToLower(name)]
+	return c, ok
+}
 
-	// To ensure the user is given a decent error message if the platform
-	// on which the daemon is running does not support a builder command.
-	if err := platformSupports(strings.ToLower(cmd)); err != nil {
-		return err
+func (r *stagesBuildResults) validateIndex(i int) error {
+	if i == len(r.flat) {
+		return errors.New("refers to current build stage")
 	}
-
-	attrs := ast.Attributes
-	original := ast.Original
-	flags := ast.Flags
-	strList := []string{}
-	msg := fmt.Sprintf("Step %d : %s", stepN+1, upperCasedCmd)
-
-	if len(ast.Flags) > 0 {
-		msg += " " + strings.Join(ast.Flags, " ")
+	if i < 0 || i > len(r.flat) {
+		return errors.New("index out of bounds")
 	}
+	return nil
+}
 
-	if cmd == "onbuild" {
-		if ast.Next == nil {
-			return fmt.Errorf("ONBUILD requires at least one argument")
+func (r *stagesBuildResults) get(nameOrIndex string) (*container.Config, error) {
+	if c, ok := r.getByName(nameOrIndex); ok {
+		return c, nil
+	}
+	ix, err := strconv.ParseInt(nameOrIndex, 10, 0)
+	if err != nil {
+		return nil, nil
+	}
+	if err := r.validateIndex(int(ix)); err != nil {
+		return nil, err
+	}
+	return r.flat[ix], nil
+}
+
+func (r *stagesBuildResults) checkStageNameAvailable(name string) error {
+	if name != "" {
+		if _, ok := r.getByName(name); ok {
+			return errors.Errorf("%s stage name already used", name)
 		}
-		ast = ast.Next.Children[0]
-		strList = append(strList, ast.Value)
-		msg += " " + ast.Value
+	}
+	return nil
+}
 
-		if len(ast.Flags) > 0 {
-			msg += " " + strings.Join(ast.Flags, " ")
+func (r *stagesBuildResults) commitStage(name string, config *container.Config) error {
+	if name != "" {
+		if _, ok := r.getByName(name); ok {
+			return errors.Errorf("%s stage name already used", name)
 		}
-
+		r.indexed[strings.ToLower(name)] = config
 	}
+	r.flat = append(r.flat, config)
+	return nil
+}
 
-	// count the number of nodes that we are going to traverse first
-	// so we can pre-create the argument and message array. This speeds up the
-	// allocation of those list a lot when they have a lot of arguments
-	cursor := ast
-	var n int
-	for cursor.Next != nil {
-		cursor = cursor.Next
-		n++
+func commitStage(state *dispatchState, stages *stagesBuildResults) error {
+	return stages.commitStage(state.stageName, state.runConfig)
+}
+
+type dispatchRequest struct {
+	state   *dispatchState
+	shlex   *ShellLex
+	builder *Builder
+	source  builder.Source
+	stages  *stagesBuildResults
+}
+
+func newDispatchRequest(builder *Builder, escapeToken rune, source builder.Source, buildArgs *buildArgs, stages *stagesBuildResults) dispatchRequest {
+	return dispatchRequest{
+		state:   newDispatchState(buildArgs),
+		shlex:   NewShellLex(escapeToken),
+		builder: builder,
+		source:  source,
+		stages:  stages,
 	}
-	msgList := make([]string, n)
+}
 
-	var i int
-	// Append the build-time args to config-environment.
-	// This allows builder config to override the variables, making the behavior similar to
-	// a shell script i.e. `ENV foo bar` overrides value of `foo` passed in build
-	// context. But `ENV foo $foo` will use the value from build context if one
-	// isn't already been defined by a previous ENV primitive.
-	// Note, we get this behavior because we know that ProcessWord() will
-	// stop on the first occurrence of a variable name and not notice
-	// a subsequent one. So, putting the buildArgs list after the Config.Env
-	// list, in 'envs', is safe.
-	envs := b.runConfig.Env
-	for key, val := range b.options.BuildArgs {
-		if !b.isBuildArgAllowed(key) {
-			// skip build-args that are not in allowed list, meaning they have
-			// not been defined by an "ARG" Dockerfile command yet.
-			// This is an error condition but only if there is no "ARG" in the entire
-			// Dockerfile, so we'll generate any necessary errors after we parsed
-			// the entire file (see 'leftoverArgs' processing in evaluator.go )
-			continue
-		}
-		envs = append(envs, fmt.Sprintf("%s=%s", key, val))
+func (s *dispatchState) updateRunConfig() {
+	s.runConfig.Image = s.imageID
+}
+
+// hasFromImage returns true if the builder has processed a `FROM <image>` line
+func (s *dispatchState) hasFromImage() bool {
+	return s.imageID != "" || (s.baseImage != nil && s.baseImage.ImageID() == "")
+}
+
+func (s *dispatchState) beginStage(stageName string, image builder.Image) {
+	s.stageName = stageName
+	s.imageID = image.ImageID()
+
+	if image.RunConfig() != nil {
+		s.runConfig = copyRunConfig(image.RunConfig()) // copy avoids referencing the same instance when 2 stages have the same base
+	} else {
+		s.runConfig = &container.Config{}
 	}
-	for ast.Next != nil {
-		ast = ast.Next
-		var str string
-		str = ast.Value
-		if replaceEnvAllowed[cmd] {
-			var err error
-			var words []string
+	s.baseImage = image
+	s.setDefaultPath()
+	s.runConfig.OpenStdin = false
+	s.runConfig.StdinOnce = false
+}
 
-			if allowWordExpansion[cmd] {
-				words, err = ProcessWords(str, envs)
-				if err != nil {
-					return err
-				}
-				strList = append(strList, words...)
-			} else {
-				str, err = ProcessWord(str, envs)
-				if err != nil {
-					return err
-				}
-				strList = append(strList, str)
-			}
-		} else {
-			strList = append(strList, str)
-		}
-		msgList[i] = ast.Value
-		i++
+// Add the default PATH to runConfig.ENV if one exists for the operating system and there
+// is no PATH set. Note that Windows containers on Windows won't have one as it's set by HCS
+func (s *dispatchState) setDefaultPath() {
+	defaultPath := system.DefaultPathEnv(s.baseImage.OperatingSystem())
+	if defaultPath == "" {
+		return
 	}
-
-	msg += " " + strings.Join(msgList, " ")
-	fmt.Fprintln(b.Stdout, msg)
-
-	// XXX yes, we skip any cmds that are not valid; the parser should have
-	// picked these out already.
-	if f, ok := evaluateTable[cmd]; ok {
-		b.flags = NewBFlags()
-		b.flags.Args = flags
-		return f(b, strList, attrs, original)
+	envMap := opts.ConvertKVStringsToMap(s.runConfig.Env)
+	if _, ok := envMap["PATH"]; !ok {
+		s.runConfig.Env = append(s.runConfig.Env, "PATH="+defaultPath)
 	}
-
-	return fmt.Errorf("Unknown instruction: %s", upperCasedCmd)
 }

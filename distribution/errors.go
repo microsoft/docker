@@ -1,15 +1,19 @@
 package distribution
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"syscall"
 
+	"github.com/docker/distribution"
+	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/distribution/registry/api/v2"
 	"github.com/docker/distribution/registry/client"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/docker/distribution/xfer"
+	"github.com/sirupsen/logrus"
 )
 
 // ErrNoSupport is an error type used for errors indicating that an operation
@@ -40,7 +44,11 @@ type fallbackError struct {
 
 // Error renders the FallbackError as a string.
 func (f fallbackError) Error() string {
-	return f.err.Error()
+	return f.Cause().Error()
+}
+
+func (f fallbackError) Cause() error {
+	return f.err
 }
 
 // shouldV2Fallback returns true if this error is a reason to fall back to v1.
@@ -50,6 +58,70 @@ func shouldV2Fallback(err errcode.Error) bool {
 		return true
 	}
 	return false
+}
+
+type notFoundError struct {
+	cause errcode.Error
+	ref   reference.Named
+}
+
+func (e notFoundError) Error() string {
+	switch e.cause.Code {
+	case errcode.ErrorCodeDenied:
+		// ErrorCodeDenied is used when access to the repository was denied
+		return fmt.Sprintf("pull access denied for %s, repository does not exist or may require 'docker login'", reference.FamiliarName(e.ref))
+	case v2.ErrorCodeManifestUnknown:
+		return fmt.Sprintf("manifest for %s not found", reference.FamiliarString(e.ref))
+	case v2.ErrorCodeNameUnknown:
+		return fmt.Sprintf("repository %s not found", reference.FamiliarName(e.ref))
+	}
+	// Shouldn't get here, but this is better than returning an empty string
+	return e.cause.Message
+}
+
+func (e notFoundError) NotFound() {}
+
+func (e notFoundError) Cause() error {
+	return e.cause
+}
+
+type unknownError struct {
+	cause error
+}
+
+func (e unknownError) Error() string {
+	return e.cause.Error()
+}
+
+func (e unknownError) Cause() error {
+	return e.cause
+}
+
+func (e unknownError) Unknown() {}
+
+// TranslatePullError is used to convert an error from a registry pull
+// operation to an error representing the entire pull operation. Any error
+// information which is not used by the returned error gets output to
+// log at info level.
+func TranslatePullError(err error, ref reference.Named) error {
+	switch v := err.(type) {
+	case errcode.Errors:
+		if len(v) != 0 {
+			for _, extra := range v[1:] {
+				logrus.Infof("Ignoring extra error returned from registry: %v", extra)
+			}
+			return TranslatePullError(v[0], ref)
+		}
+	case errcode.Error:
+		switch v.Code {
+		case errcode.ErrorCodeDenied, v2.ErrorCodeManifestUnknown, v2.ErrorCodeNameUnknown:
+			return notFoundError{v, ref}
+		}
+	case xfer.DoNotRetry:
+		return TranslatePullError(v.Err, ref)
+	}
+
+	return unknownError{err}
 }
 
 // continueOnError returns true if we should fallback to the next endpoint
@@ -70,7 +142,7 @@ func continueOnError(err error) bool {
 	case ImageConfigPullError:
 		return false
 	case error:
-		return !strings.Contains(err.Error(), strings.ToLower(syscall.ENOSPC.Error()))
+		return !strings.Contains(err.Error(), strings.ToLower(syscall.ESRCH.Error()))
 	}
 	// let's be nice and fallback if the error is a completely
 	// unexpected one.
@@ -89,7 +161,7 @@ func retryOnError(err error) error {
 		}
 	case errcode.Error:
 		switch v.Code {
-		case errcode.ErrorCodeUnauthorized, errcode.ErrorCodeUnsupported, errcode.ErrorCodeDenied:
+		case errcode.ErrorCodeUnauthorized, errcode.ErrorCodeUnsupported, errcode.ErrorCodeDenied, errcode.ErrorCodeTooManyRequests, v2.ErrorCodeNameUnknown:
 			return xfer.DoNotRetry{Err: err}
 		}
 	case *url.Error:
@@ -101,6 +173,9 @@ func retryOnError(err error) error {
 	case *client.UnexpectedHTTPResponseError:
 		return xfer.DoNotRetry{Err: err}
 	case error:
+		if err == distribution.ErrBlobUnknown {
+			return xfer.DoNotRetry{Err: err}
+		}
 		if strings.Contains(err.Error(), strings.ToLower(syscall.ENOSPC.Error())) {
 			return xfer.DoNotRetry{Err: err}
 		}
@@ -111,3 +186,30 @@ func retryOnError(err error) error {
 	// add them to the switch above.
 	return err
 }
+
+type invalidManifestClassError struct {
+	mediaType string
+	class     string
+}
+
+func (e invalidManifestClassError) Error() string {
+	return fmt.Sprintf("Encountered remote %q(%s) when fetching", e.mediaType, e.class)
+}
+
+func (e invalidManifestClassError) InvalidParameter() {}
+
+type invalidManifestFormatError struct{}
+
+func (invalidManifestFormatError) Error() string {
+	return "unsupported manifest format"
+}
+
+func (invalidManifestFormatError) InvalidParameter() {}
+
+type reservedNameError string
+
+func (e reservedNameError) Error() string {
+	return "'" + string(e) + "' is a reserved name"
+}
+
+func (e reservedNameError) Forbidden() {}

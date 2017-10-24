@@ -13,9 +13,11 @@ import (
 	"errors"
 	"io"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/docker/distribution/digest"
+	"github.com/docker/distribution"
 	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/pkg/containerfs"
+	"github.com/opencontainers/go-digest"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -50,9 +52,9 @@ var (
 	// greater than the 125 max.
 	ErrMaxDepthExceeded = errors.New("max depth exceeded")
 
-	// ErrNotSupported is used when the action is not supppoted
-	// on the current platform
-	ErrNotSupported = errors.New("not support on this platform")
+	// ErrNotSupported is used when the action is not supported
+	// on the current host operating system.
+	ErrNotSupported = errors.New("not support on this host operating system")
 )
 
 // ChainID is the content-addressable ID of a layer.
@@ -60,6 +62,14 @@ type ChainID digest.Digest
 
 // String returns a string rendition of a layer ID
 func (id ChainID) String() string {
+	return string(id)
+}
+
+// OS is the operating system of a layer
+type OS string
+
+// String returns a string rendition of layers target operating system
+func (id OS) String() string {
 	return string(id)
 }
 
@@ -83,6 +93,10 @@ type TarStreamer interface {
 type Layer interface {
 	TarStreamer
 
+	// TarStreamFrom returns a tar archive stream for all the layer chain with
+	// arbitrary depth.
+	TarStreamFrom(ChainID) (io.ReadCloser, error)
+
 	// ChainID returns the content hash of the entire layer chain. The hash
 	// chain is made up of DiffID of top layer and all of its parents.
 	ChainID() ChainID
@@ -93,6 +107,9 @@ type Layer interface {
 
 	// Parent returns the next layer in the layer chain.
 	Parent() Layer
+
+	// OS returns the operating system of the layer
+	OS() OS
 
 	// Size returns the size of the entire layer chain. The size
 	// is calculated from the total size of all files in the layers.
@@ -121,7 +138,7 @@ type RWLayer interface {
 
 	// Mount mounts the RWLayer and returns the filesystem path
 	// the to the writable layer.
-	Mount(mountLabel string) (string, error)
+	Mount(mountLabel string) (containerfs.ContainerFS, error)
 
 	// Unmount unmounts the RWLayer. This should be called
 	// for every mount. If there are multiple mount calls
@@ -162,24 +179,37 @@ type Metadata struct {
 // writable mount. Changes made here will
 // not be included in the Tar stream of the
 // RWLayer.
-type MountInit func(root string) error
+type MountInit func(root containerfs.ContainerFS) error
+
+// CreateRWLayerOpts contains optional arguments to be passed to CreateRWLayer
+type CreateRWLayerOpts struct {
+	MountLabel string
+	InitFunc   MountInit
+	StorageOpt map[string]string
+}
 
 // Store represents a backend for managing both
 // read-only and read-write layers.
 type Store interface {
-	Register(io.Reader, ChainID) (Layer, error)
+	Register(io.Reader, ChainID, OS) (Layer, error)
 	Get(ChainID) (Layer, error)
+	Map() map[ChainID]Layer
 	Release(Layer) ([]Metadata, error)
 
-	CreateRWLayer(id string, parent ChainID, mountLabel string, initFunc MountInit, storageOpt map[string]string) (RWLayer, error)
+	CreateRWLayer(id string, parent ChainID, opts *CreateRWLayerOpts) (RWLayer, error)
 	GetRWLayer(id string) (RWLayer, error)
 	GetMountID(id string) (string, error)
-	ReinitRWLayer(l RWLayer) error
 	ReleaseRWLayer(RWLayer) ([]Metadata, error)
 
 	Cleanup() error
 	DriverStatus() [][2]string
 	DriverName() string
+}
+
+// DescribableStore represents a layer store capable of storing
+// descriptors for layers.
+type DescribableStore interface {
+	RegisterWithDescriptor(io.Reader, ChainID, OS, distribution.Descriptor) (Layer, error)
 }
 
 // MetadataTransaction represents functions for setting layer metadata
@@ -189,6 +219,8 @@ type MetadataTransaction interface {
 	SetParent(parent ChainID) error
 	SetDiffID(DiffID) error
 	SetCacheID(string) error
+	SetDescriptor(distribution.Descriptor) error
+	SetOS(OS) error
 	TarSplitWriter(compressInput bool) (io.WriteCloser, error)
 
 	Commit(ChainID) error
@@ -208,6 +240,8 @@ type MetadataStore interface {
 	GetParent(ChainID) (ChainID, error)
 	GetDiffID(ChainID) (DiffID, error)
 	GetCacheID(ChainID) (string, error)
+	GetDescriptor(ChainID) (distribution.Descriptor, error)
+	GetOS(ChainID) (OS, error)
 	TarSplitReader(ChainID) (io.ReadCloser, error)
 
 	SetMountID(string, string) error

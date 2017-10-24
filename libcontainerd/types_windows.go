@@ -1,32 +1,42 @@
 package libcontainerd
 
-import "github.com/docker/docker/libcontainerd/windowsoci"
+import (
+	"time"
 
-// Spec is the base configuration for the container.
-type Spec windowsoci.WindowsSpec
+	"github.com/Microsoft/hcsshim"
+	opengcs "github.com/Microsoft/opengcs/client"
+)
 
-// Process contains information to start a specific application inside the container.
-type Process windowsoci.Process
+// Summary contains a ProcessList item from HCS to support `top`
+type Summary hcsshim.ProcessListItem
 
-// User specifies user information for the containers main process.
-type User windowsoci.User
-
-// Summary container a container summary from containerd
-type Summary struct {
-	Pid     uint32
-	Command string
+// Stats contains statistics from HCS
+type Stats struct {
+	Read     time.Time
+	HCSStats *hcsshim.Statistics
 }
 
-// StateInfo contains description about the new state container has entered.
-type StateInfo struct {
-	CommonStateInfo
-
-	// Platform specific StateInfo
-	UpdatePending bool
+func interfaceToStats(read time.Time, v interface{}) *Stats {
+	return &Stats{
+		HCSStats: v.(*hcsshim.Statistics),
+		Read:     read,
+	}
 }
-
-// Stats contains a stats properties from containerd.
-type Stats struct{}
 
 // Resources defines updatable container resource values.
 type Resources struct{}
+
+// LCOWOption is a CreateOption required for LCOW configuration
+type LCOWOption struct {
+	Config *opengcs.Config
+}
+
+// Checkpoint holds the details of a checkpoint (not supported in windows)
+type Checkpoint struct {
+	Name string
+}
+
+// Checkpoints contains the details of a checkpoint
+type Checkpoints struct {
+	Checkpoints []*Checkpoint
+}

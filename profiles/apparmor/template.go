@@ -24,8 +24,6 @@ profile {{.Name}} flags=(attach_disconnected,mediate_deleted) {
   deny @{PROC}/sys/[^k]** w,  # deny /proc/sys except /proc/sys/k* (effectively /proc/sys/kernel)
   deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,  # deny everything except shm* in /proc/sys/kernel/
   deny @{PROC}/sysrq-trigger rwklx,
-  deny @{PROC}/mem rwklx,
-  deny @{PROC}/kmem rwklx,
   deny @{PROC}/kcore rwklx,
 
   deny mount,
@@ -35,12 +33,12 @@ profile {{.Name}} flags=(attach_disconnected,mediate_deleted) {
   deny /sys/fs/[^c]*/** wklx,
   deny /sys/fs/c[^g]*/** wklx,
   deny /sys/fs/cg[^r]*/** wklx,
-  deny /sys/firmware/efi/efivars/** rwklx,
+  deny /sys/firmware/** rwklx,
   deny /sys/kernel/security/** rwklx,
 
 {{if ge .Version 208095}}
   # suppress ptrace denials when using 'docker ps' or using 'ps' inside a container
-  ptrace (trace,read) peer=docker-default,
+  ptrace (trace,read) peer={{.Name}},
 {{end}}
 }
 `

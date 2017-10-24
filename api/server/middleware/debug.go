@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/pkg/ioutils"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -40,9 +41,7 @@ func DebugRequestMiddleware(handler func(ctx context.Context, w http.ResponseWri
 
 		var postForm map[string]interface{}
 		if err := json.Unmarshal(b, &postForm); err == nil {
-			if _, exists := postForm["password"]; exists {
-				postForm["password"] = "*****"
-			}
+			maskSecretKeys(postForm, r.RequestURI)
 			formStr, errMarshal := json.Marshal(postForm)
 			if errMarshal == nil {
 				logrus.Debugf("form data: %s", string(formStr))
@@ -52,5 +51,44 @@ func DebugRequestMiddleware(handler func(ctx context.Context, w http.ResponseWri
 		}
 
 		return handler(ctx, w, r, vars)
+	}
+}
+
+func maskSecretKeys(inp interface{}, path string) {
+	// Remove any query string from the path
+	idx := strings.Index(path, "?")
+	if idx != -1 {
+		path = path[:idx]
+	}
+	// Remove trailing / characters
+	path = strings.TrimRight(path, "/")
+
+	if arr, ok := inp.([]interface{}); ok {
+		for _, f := range arr {
+			maskSecretKeys(f, path)
+		}
+		return
+	}
+
+	if form, ok := inp.(map[string]interface{}); ok {
+	loop0:
+		for k, v := range form {
+			for _, m := range []string{"password", "secret", "jointoken", "unlockkey", "signingcakey"} {
+				if strings.EqualFold(m, k) {
+					form[k] = "*****"
+					continue loop0
+				}
+			}
+			maskSecretKeys(v, path)
+		}
+
+		// Route-specific redactions
+		if strings.HasSuffix(path, "/secrets/create") {
+			for k := range form {
+				if k == "Data" {
+					form[k] = "*****"
+				}
+			}
+		}
 	}
 }

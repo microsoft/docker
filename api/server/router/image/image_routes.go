@@ -6,16 +6,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
-	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/docker/api/server/httputils"
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/streamformatter"
-	"github.com/docker/engine-api/types"
-	"github.com/docker/engine-api/types/container"
+	"github.com/docker/docker/pkg/system"
+	"github.com/docker/docker/registry"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
@@ -32,7 +38,7 @@ func (s *imageRouter) postCommit(ctx context.Context, w http.ResponseWriter, r *
 
 	pause := httputils.BoolValue(r, "pause")
 	version := httputils.VersionFromContext(ctx)
-	if r.FormValue("pause") == "" && version.GreaterThanOrEqualTo("1.13") {
+	if r.FormValue("pause") == "" && versions.GreaterThanOrEqualTo(version, "1.13") {
 		pause = true
 	}
 
@@ -62,73 +68,99 @@ func (s *imageRouter) postCommit(ctx context.Context, w http.ResponseWriter, r *
 		return err
 	}
 
-	return httputils.WriteJSON(w, http.StatusCreated, &types.ContainerCommitResponse{
-		ID: string(imgID),
-	})
+	return httputils.WriteJSON(w, http.StatusCreated, &types.IDResponse{ID: imgID})
 }
 
 // Creates an image from Pull or from Import
 func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
 	var (
-		image   = r.Form.Get("fromImage")
-		repo    = r.Form.Get("repo")
-		tag     = r.Form.Get("tag")
-		message = r.Form.Get("message")
-		err     error
-		output  = ioutils.NewWriteFlusher(w)
+		image    = r.Form.Get("fromImage")
+		repo     = r.Form.Get("repo")
+		tag      = r.Form.Get("tag")
+		message  = r.Form.Get("message")
+		err      error
+		output   = ioutils.NewWriteFlusher(w)
+		platform = &specs.Platform{}
 	)
 	defer output.Close()
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if image != "" { //pull
-		metaHeaders := map[string][]string{}
-		for k, v := range r.Header {
-			if strings.HasPrefix(k, "X-Meta-") {
-				metaHeaders[k] = v
+	version := httputils.VersionFromContext(ctx)
+	if versions.GreaterThanOrEqualTo(version, "1.32") {
+		// TODO @jhowardmsft. The following environment variable is an interim
+		// measure to allow the daemon to have a default platform if omitted by
+		// the client. This allows LCOW and WCOW to work with a down-level CLI
+		// for a short period of time, as the CLI changes can't be merged
+		// until after the daemon changes have been merged. Once the CLI is
+		// updated, this can be removed. PR for CLI is currently in
+		// https://github.com/docker/cli/pull/474.
+		apiPlatform := r.FormValue("platform")
+		if system.LCOWSupported() && apiPlatform == "" {
+			apiPlatform = os.Getenv("LCOW_API_PLATFORM_IF_OMITTED")
+		}
+		platform = system.ParsePlatform(apiPlatform)
+		if err = system.ValidatePlatform(platform); err != nil {
+			err = fmt.Errorf("invalid platform: %s", err)
+		}
+	}
+
+	if err == nil {
+		if image != "" { //pull
+			metaHeaders := map[string][]string{}
+			for k, v := range r.Header {
+				if strings.HasPrefix(k, "X-Meta-") {
+					metaHeaders[k] = v
+				}
 			}
-		}
 
-		authEncoded := r.Header.Get("X-Registry-Auth")
-		authConfig := &types.AuthConfig{}
-		if authEncoded != "" {
-			authJSON := base64.NewDecoder(base64.URLEncoding, strings.NewReader(authEncoded))
-			if err := json.NewDecoder(authJSON).Decode(authConfig); err != nil {
-				// for a pull it is not an error if no auth was given
-				// to increase compatibility with the existing api it is defaulting to be empty
-				authConfig = &types.AuthConfig{}
+			authEncoded := r.Header.Get("X-Registry-Auth")
+			authConfig := &types.AuthConfig{}
+			if authEncoded != "" {
+				authJSON := base64.NewDecoder(base64.URLEncoding, strings.NewReader(authEncoded))
+				if err := json.NewDecoder(authJSON).Decode(authConfig); err != nil {
+					// for a pull it is not an error if no auth was given
+					// to increase compatibility with the existing api it is defaulting to be empty
+					authConfig = &types.AuthConfig{}
+				}
 			}
+			err = s.backend.PullImage(ctx, image, tag, platform.OS, metaHeaders, authConfig, output)
+		} else { //import
+			src := r.Form.Get("fromSrc")
+			// 'err' MUST NOT be defined within this block, we need any error
+			// generated from the download to be available to the output
+			// stream processing below
+			err = s.backend.ImportImage(src, repo, platform.OS, tag, message, r.Body, output, r.Form["changes"])
 		}
-
-		err = s.backend.PullImage(ctx, image, tag, metaHeaders, authConfig, output)
-
-		// Check the error from pulling an image to make sure the request
-		// was authorized. Modify the status if the request was
-		// unauthorized to respond with 401 rather than 500.
-		if err != nil && isAuthorizedError(err) {
-			err = errcode.ErrorCodeUnauthorized.WithMessage(fmt.Sprintf("Authentication is required: %s", err))
-		}
-	} else { //import
-		src := r.Form.Get("fromSrc")
-		// 'err' MUST NOT be defined within this block, we need any error
-		// generated from the download to be available to the output
-		// stream processing below
-		err = s.backend.ImportImage(src, repo, tag, message, r.Body, output, r.Form["changes"])
 	}
 	if err != nil {
 		if !output.Flushed() {
 			return err
 		}
-		sf := streamformatter.NewJSONStreamFormatter()
-		output.Write(sf.FormatError(err))
+		output.Write(streamformatter.FormatError(err))
 	}
 
 	return nil
 }
+
+type validationError struct {
+	cause error
+}
+
+func (e validationError) Error() string {
+	return e.cause.Error()
+}
+
+func (e validationError) Cause() error {
+	return e.cause
+}
+
+func (validationError) InvalidParameter() {}
 
 func (s *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	metaHeaders := map[string][]string{}
@@ -153,7 +185,7 @@ func (s *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter,
 	} else {
 		// the old format is supported for compatibility if there was no authConfig header
 		if err := json.NewDecoder(r.Body).Decode(authConfig); err != nil {
-			return fmt.Errorf("Bad parameters and missing X-Registry-Auth: %v", err)
+			return errors.Wrap(validationError{err}, "Bad parameters and missing X-Registry-Auth")
 		}
 	}
 
@@ -169,8 +201,7 @@ func (s *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter,
 		if !output.Flushed() {
 			return err
 		}
-		sf := streamformatter.NewJSONStreamFormatter()
-		output.Write(sf.FormatError(err))
+		output.Write(streamformatter.FormatError(err))
 	}
 	return nil
 }
@@ -195,8 +226,7 @@ func (s *imageRouter) getImagesGet(ctx context.Context, w http.ResponseWriter, r
 		if !output.Flushed() {
 			return err
 		}
-		sf := streamformatter.NewJSONStreamFormatter()
-		output.Write(sf.FormatError(err))
+		output.Write(streamformatter.FormatError(err))
 	}
 	return nil
 }
@@ -207,18 +237,23 @@ func (s *imageRouter) postImagesLoad(ctx context.Context, w http.ResponseWriter,
 	}
 	quiet := httputils.BoolValueOrDefault(r, "quiet", true)
 
-	if !quiet {
-		w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json")
 
-		output := ioutils.NewWriteFlusher(w)
-		defer output.Close()
-		if err := s.backend.LoadImage(r.Body, output, quiet); err != nil {
-			output.Write(streamformatter.NewJSONStreamFormatter().FormatError(err))
-		}
-		return nil
+	output := ioutils.NewWriteFlusher(w)
+	defer output.Close()
+	if err := s.backend.LoadImage(r.Body, output, quiet); err != nil {
+		output.Write(streamformatter.FormatError(err))
 	}
-	return s.backend.LoadImage(r.Body, w, quiet)
+	return nil
 }
+
+type missingImageError struct{}
+
+func (missingImageError) Error() string {
+	return "image name cannot be blank"
+}
+
+func (missingImageError) InvalidParameter() {}
 
 func (s *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
@@ -228,7 +263,7 @@ func (s *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, r
 	name := vars["name"]
 
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("image name cannot be blank")
+		return missingImageError{}
 	}
 
 	force := httputils.BoolValue(r, "force")
@@ -256,8 +291,18 @@ func (s *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter, 
 		return err
 	}
 
-	// FIXME: The filter parameter could just be a match filter
-	images, err := s.backend.Images(r.Form.Get("filters"), r.Form.Get("filter"), httputils.BoolValue(r, "all"))
+	imageFilters, err := filters.FromJSON(r.Form.Get("filters"))
+	if err != nil {
+		return err
+	}
+
+	filterParam := r.Form.Get("filter")
+	// FIXME(vdemeester) This has been deprecated in 1.13, and is target for removal for v17.12
+	if filterParam != "" {
+		imageFilters.Add("reference", filterParam)
+	}
+
+	images, err := s.backend.Images(imageFilters, httputils.BoolValue(r, "all"), false)
 	if err != nil {
 		return err
 	}
@@ -309,22 +354,34 @@ func (s *imageRouter) getImagesSearch(ctx context.Context, w http.ResponseWriter
 			headers[k] = v
 		}
 	}
-	query, err := s.backend.SearchRegistryForImages(ctx, r.Form.Get("term"), config, headers)
+	limit := registry.DefaultSearchLimit
+	if r.Form.Get("limit") != "" {
+		limitValue, err := strconv.Atoi(r.Form.Get("limit"))
+		if err != nil {
+			return err
+		}
+		limit = limitValue
+	}
+	query, err := s.backend.SearchRegistryForImages(ctx, r.Form.Get("filters"), r.Form.Get("term"), limit, config, headers)
 	if err != nil {
 		return err
 	}
 	return httputils.WriteJSON(w, http.StatusOK, query.Results)
 }
 
-func isAuthorizedError(err error) bool {
-	if urlError, ok := err.(*url.Error); ok {
-		err = urlError.Err
+func (s *imageRouter) postImagesPrune(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	if err := httputils.ParseForm(r); err != nil {
+		return err
 	}
 
-	if dError, ok := err.(errcode.Error); ok {
-		if dError.ErrorCode() == errcode.ErrorCodeUnauthorized {
-			return true
-		}
+	pruneFilters, err := filters.FromJSON(r.Form.Get("filters"))
+	if err != nil {
+		return err
 	}
-	return false
+
+	pruneReport, err := s.backend.ImagesPrune(ctx, pruneFilters)
+	if err != nil {
+		return err
+	}
+	return httputils.WriteJSON(w, http.StatusOK, pruneReport)
 }

@@ -3,7 +3,7 @@ package container
 import (
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -23,7 +23,7 @@ func (container *Container) Reset(lock bool) {
 
 	// Re-create a brand new stdin pipe once the container exited
 	if container.Config.OpenStdin {
-		container.NewInputPipes()
+		container.StreamConfig.NewInputPipes()
 	}
 
 	if container.LogDriver != nil {
@@ -35,7 +35,7 @@ func (container *Container) Reset(lock bool) {
 			}()
 			select {
 			case <-time.After(loggerCloseTimeout):
-				logrus.Warnf("Logger didn't exit in time: logs may be truncated")
+				logrus.Warn("Logger didn't exit in time: logs may be truncated")
 			case <-exit:
 			}
 		}
