@@ -1,11 +1,13 @@
-package libcontainerd // import "github.com/docker/docker/libcontainerd"
+package types // import "github.com/docker/docker/libcontainerd/types"
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
+	"github.com/docker/docker/errdefs"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -89,3 +91,15 @@ type Client interface {
 
 // StdioCallback is called to connect a container or process stdio.
 type StdioCallback func(io *cio.DirectIO) (cio.IO, error)
+
+// InitProcessName is the name given to the first process of a container
+const InitProcessName = "init"
+
+// NewNotFoundError returns a NotFound error
+func NewNotFoundError(err string) error { return errdefs.NotFound(errors.New(err)) }
+
+// NewInvalidParameterError returns an InvalidParameter error
+func NewInvalidParameterError(err string) error { return errdefs.InvalidParameter(errors.New(err)) }
+
+// NewConflictError returns a Conflict error
+func NewConflictError(err string) error { return errdefs.Conflict(errors.New(err)) }
