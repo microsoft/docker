@@ -136,7 +136,7 @@ func (c *client) Restore(ctx context.Context, id string, attachStdio libcontaine
 	_, ok := c.containers[id]
 	if ok {
 		c.Unlock()
-		return false, 0, errors.WithStack(libcontainerdtypes.NewConflictError("id already in use"))
+		return false, 0, errors.WithStack(errdefs.Conflict(errors.New("id already in use")))
 	}
 
 	cntr := &container{}
@@ -209,7 +209,7 @@ func (c *client) Restore(ctx context.Context, id string, attachStdio libcontaine
 
 func (c *client) Create(ctx context.Context, id string, ociSpec *specs.Spec, runtimeOptions interface{}) error {
 	if ctr := c.getContainer(id); ctr != nil {
-		return errors.WithStack(libcontainerdtypes.NewConflictError("id already in use"))
+		return errors.WithStack(errdefs.Conflict(errors.New("id already in use")))
 	}
 
 	bdir, err := prepareBundleDir(filepath.Join(c.stateDir, id), ociSpec)
@@ -240,10 +240,10 @@ func (c *client) Create(ctx context.Context, id string, ociSpec *specs.Spec, run
 func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin bool, attachStdio libcontainerdtypes.StdioCallback) (int, error) {
 	ctr := c.getContainer(id)
 	if ctr == nil {
-		return -1, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such container"))
+		return -1, errors.WithStack(errdefs.NotFound(errors.New("no such container")))
 	}
 	if t := ctr.getTask(); t != nil {
-		return -1, errors.WithStack(libcontainerdtypes.NewConflictError("container already started"))
+		return -1, errors.WithStack(errdefs.Conflict(errors.New("container already started")))
 	}
 
 	var (
@@ -342,15 +342,15 @@ func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin 
 func (c *client) Exec(ctx context.Context, containerID, processID string, spec *specs.Process, withStdin bool, attachStdio libcontainerdtypes.StdioCallback) (int, error) {
 	ctr := c.getContainer(containerID)
 	if ctr == nil {
-		return -1, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such container"))
+		return -1, errors.WithStack(errdefs.NotFound(errors.New("no such container")))
 	}
 	t := ctr.getTask()
 	if t == nil {
-		return -1, errors.WithStack(libcontainerdtypes.NewInvalidParameterError("container is not running"))
+		return -1, errors.WithStack(errdefs.InvalidParameter(errors.New("container is not running")))
 	}
 
 	if p := ctr.getProcess(processID); p != nil {
-		return -1, errors.WithStack(libcontainerdtypes.NewConflictError("id already in use"))
+		return -1, errors.WithStack(errdefs.Conflict(errors.New("id already in use")))
 	}
 
 	var (
@@ -529,7 +529,7 @@ func (c *client) DeleteTask(ctx context.Context, containerID string) (uint32, ti
 func (c *client) Delete(ctx context.Context, containerID string) error {
 	ctr := c.getContainer(containerID)
 	if ctr == nil {
-		return errors.WithStack(libcontainerdtypes.NewNotFoundError("no such container"))
+		return errors.WithStack(errdefs.NotFound(errors.New("no such container")))
 	}
 
 	if err := ctr.ctr.Delete(ctx); err != nil {
@@ -553,12 +553,12 @@ func (c *client) Delete(ctx context.Context, containerID string) error {
 func (c *client) Status(ctx context.Context, containerID string) (libcontainerdtypes.Status, error) {
 	ctr := c.getContainer(containerID)
 	if ctr == nil {
-		return libcontainerdtypes.StatusUnknown, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such container"))
+		return libcontainerdtypes.StatusUnknown, errors.WithStack(errdefs.NotFound(errors.New("no such container")))
 	}
 
 	t := ctr.getTask()
 	if t == nil {
-		return libcontainerdtypes.StatusUnknown, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such task"))
+		return libcontainerdtypes.StatusUnknown, errors.WithStack(errdefs.NotFound(errors.New("no such task")))
 	}
 
 	s, err := t.Status(ctx)
@@ -652,12 +652,12 @@ func (c *client) removeContainer(id string) {
 func (c *client) getProcess(containerID, processID string) (containerd.Process, error) {
 	ctr := c.getContainer(containerID)
 	if ctr == nil {
-		return nil, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such container"))
+		return nil, errors.WithStack(errdefs.NotFound(errors.New("no such container")))
 	}
 
 	t := ctr.getTask()
 	if t == nil {
-		return nil, errors.WithStack(libcontainerdtypes.NewNotFoundError("container is not running"))
+		return nil, errors.WithStack(errdefs.NotFound(errors.New("container is not running")))
 	}
 	if processID == libcontainerdtypes.InitProcessName {
 		return t, nil
@@ -665,7 +665,7 @@ func (c *client) getProcess(containerID, processID string) (containerd.Process, 
 
 	p := ctr.getProcess(processID)
 	if p == nil {
-		return nil, errors.WithStack(libcontainerdtypes.NewNotFoundError("no such exec"))
+		return nil, errors.WithStack(errdefs.NotFound(errors.New("no such exec")))
 	}
 	return p, nil
 }
