@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/containerd/containerd/runtime/linux/runctypes"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/errdefs"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 )
 
@@ -54,4 +56,14 @@ func (daemon *Daemon) getLibcontainerdCreateOptions(container *container.Contain
 	}
 
 	return opts, nil
+}
+
+// postCreate does platform-specific process after a container has been created,
+// but before it has been started.
+func postCreate(spec *specs.Spec) error {
+	return nil
+}
+
+// postStart does platform-specific process after a container has been started.
+func postStart(spec *specs.Spec, handle syscall.Handle) {
 }

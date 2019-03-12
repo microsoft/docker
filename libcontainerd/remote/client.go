@@ -283,6 +283,7 @@ func (c *client) Start(ctx context.Context, id, checkpointDir string, withStdin 
 		return -1, errors.Wrap(err, "failed to retrieve spec")
 	}
 	uid, gid := getSpecUser(spec)
+
 	t, err = ctr.ctr.NewTask(ctx,
 		func(id string) (cio.IO, error) {
 			fifos := newFIFOSet(ctr.bundleDir, libcontainerdtypes.InitProcessName, withStdin, spec.Process.Terminal)

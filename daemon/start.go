@@ -3,6 +3,7 @@ package daemon // import "github.com/docker/docker/daemon"
 import (
 	"context"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -195,17 +196,32 @@ func (daemon *Daemon) containerStart(container *container.Container, checkpoint 
 		}
 	}
 
+	// Platform-specific processing between Create and Start
+	handle, err := postCreate(spec)
+	if err != nil {
+		if err2 := daemon.containerd.Delete(context.Background(), container.ID); err2 != nil {
+			logrus.WithError(err2).WithField("container", container.ID).Error("failed to delete failed post-create processing")
+		}
+		return err
+	}
+
 	// TODO(mlaventure): we need to specify checkpoint options here
 	pid, err := daemon.containerd.Start(context.Background(), container.ID, checkpointDir,
 		container.StreamConfig.Stdin() != nil || container.Config.Tty,
 		container.InitializeStdio)
 	if err != nil {
+		if handle != 0 {
+			syscall.CloseHandle(handle)
+		}
 		if err := daemon.containerd.Delete(context.Background(), container.ID); err != nil {
 			logrus.WithError(err).WithField("container", container.ID).
 				Error("failed to delete failed start container")
 		}
 		return translateContainerdStartErr(container.Path, container.SetExitCode, err)
 	}
+
+	// Platform-specific processing after start
+	postStart(spec, handle)
 
 	container.SetRunning(pid, true)
 	container.HasBeenStartedBefore = true
