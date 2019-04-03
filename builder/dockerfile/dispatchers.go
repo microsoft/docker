@@ -32,6 +32,7 @@ import (
 )
 
 // ENV foo bar
+// ENV --from stagename
 //
 // Sets the environment variable foo to bar, also makes interpolation
 // in the dockerfile available from the next statement on via ${foo}.
@@ -39,23 +40,32 @@ import (
 func dispatchEnv(d dispatchRequest, c *instructions.EnvCommand) error {
 	runConfig := d.state.runConfig
 	commitMessage := bytes.NewBufferString("ENV")
-	for _, e := range c.Env {
-		name := e.Key
-		newVar := e.String()
-
-		commitMessage.WriteString(" " + newVar)
-		gotOne := false
-		for i, envVar := range runConfig.Env {
-			envParts := strings.SplitN(envVar, "=", 2)
-			compareFrom := envParts[0]
-			if shell.EqualEnvKeys(compareFrom, name) {
-				runConfig.Env[i] = newVar
-				gotOne = true
-				break
-			}
+	if c.From != "" {
+		// Copy the environment block from the `c.From` stage
+		if _, ok := d.stages.indexed[c.From]; !ok {
+			return fmt.Errorf("invalid from flag value %s", c.From)
 		}
-		if !gotOne {
-			runConfig.Env = append(runConfig.Env, newVar)
+		commitMessage.WriteString(" --from " + c.From)
+		runConfig.Env = d.stages.indexed[c.From].Env
+	} else {
+		for _, e := range c.Env {
+			name := e.Key
+			newVar := e.String()
+
+			commitMessage.WriteString(" " + newVar)
+			gotOne := false
+			for i, envVar := range runConfig.Env {
+				envParts := strings.SplitN(envVar, "=", 2)
+				compareFrom := envParts[0]
+				if shell.EqualEnvKeys(compareFrom, name) {
+					runConfig.Env[i] = newVar
+					gotOne = true
+					break
+				}
+			}
+			if !gotOne {
+				runConfig.Env = append(runConfig.Env, newVar)
+			}
 		}
 	}
 	return d.builder.commit(d.state, commitMessage.String())
