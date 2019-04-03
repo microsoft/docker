@@ -192,9 +192,15 @@ func parseKvps(args []string, cmdName string) (KeyValuePairs, error) {
 }
 
 func parseEnv(req parseRequest) (*EnvCommand, error) {
-
+	flFrom := req.flags.AddString("from", "")
 	if err := req.flags.Parse(); err != nil {
 		return nil, err
+	}
+	if flFrom.Value != "" {
+		return &EnvCommand{
+			From:            flFrom.Value,
+			withNameAndCode: newWithNameAndCode(req),
+		}, nil
 	}
 	envs, err := parseKvps(req.args, "ENV")
 	if err != nil {
@@ -202,6 +208,7 @@ func parseEnv(req parseRequest) (*EnvCommand, error) {
 	}
 	return &EnvCommand{
 		Env:             envs,
+		From:            flFrom.Value,
 		withNameAndCode: newWithNameAndCode(req),
 	}, nil
 }
