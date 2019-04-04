@@ -197,10 +197,17 @@ func parseEnv(req parseRequest) (*EnvCommand, error) {
 		return nil, err
 	}
 	if flFrom.Value != "" {
-		return &EnvCommand{
+		ec := &EnvCommand{
 			From:            flFrom.Value,
 			withNameAndCode: newWithNameAndCode(req),
-		}, nil
+		}
+		// Due to the way parseEnv works, we only get two args back at most
+		// as it's not treated like COPY/ADD which goes through possible JSON
+		// to list.
+		if len(req.args) > 0 {
+			ec.FromList = strings.Split(strings.Join(req.args, " "), " ")
+		}
+		return ec, nil
 	}
 	envs, err := parseKvps(req.args, "ENV")
 	if err != nil {

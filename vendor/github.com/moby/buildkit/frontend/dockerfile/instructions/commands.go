@@ -108,13 +108,18 @@ func expandSliceInPlace(values []string, expander SingleWordExpander) error {
 // EnvCommand : ENV key1 value1 [keyN valueN...]
 type EnvCommand struct {
 	withNameAndCode
-	From string
-	Env  KeyValuePairs // kvp slice instead of map to preserve ordering
+	From     string
+	FromList []string
+	Env      KeyValuePairs // kvp slice instead of map to preserve ordering
 }
 
 // Expand variables
 func (c *EnvCommand) Expand(expander SingleWordExpander) error {
-	return expandKvpsInPlace(c.Env, expander)
+	if c.From == "" {
+		return expandKvpsInPlace(c.Env, expander)
+	}
+	return expandSliceInPlace(c.FromList, expander)
+
 }
 
 // MaintainerCommand : MAINTAINER maintainer_name
