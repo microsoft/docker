@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/containerd/containerd/platforms"
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
@@ -127,7 +128,8 @@ func checkImageCompatibility(imageOS, imageOSVersion string) error {
 		splitImageOSVersion := strings.Split(imageOSVersion, ".") // eg 10.0.16299.nnnn
 		if len(splitImageOSVersion) >= 3 {
 			if imageOSBuild, err := strconv.Atoi(splitImageOSVersion[2]); err == nil {
-				if imageOSBuild > int(hostOSV.Build) {
+				// As of RS5, we allow later images, but only when run as a Hyper-V isolated container.
+				if system.GetOSVersion().Build < osversion.RS5 && imageOSBuild > int(hostOSV.Build) {
 					errMsg := fmt.Sprintf("a Windows version %s.%s.%s-based image is incompatible with a %s host", splitImageOSVersion[0], splitImageOSVersion[1], splitImageOSVersion[2], hostOSV.ToString())
 					logrus.Debugf(errMsg)
 					return errors.New(errMsg)
