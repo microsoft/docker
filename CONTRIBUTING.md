@@ -98,11 +98,11 @@ Additional info:
 ```
 
 
-##Quick contribution tips and guidelines
+## Quick contribution tips and guidelines
 
 This section gives the experienced contributor some tips and guidelines.
 
-###Pull requests are always welcome
+### Pull requests are always welcome
 
 Not sure if that typo is worth a pull request? Found a bug and know how to fix
 it? Do it! We will appreciate it. Any significant improvement should be
