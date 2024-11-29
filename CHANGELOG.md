@@ -1107,7 +1107,7 @@ by another client (#15489)
 * Update issue filing instructions
 * Warn against the use of symlinks for Docker's storage folder
 * Replace the Firefox example with an IceWeasel example
-* Rewrite the PostgresSQL example using a Dockerfile and add more details to it
+* Rewrite the PostgreSQL example using a Dockerfile and add more details to it
 * Improve the OS X documentation
 
 #### Remote API
